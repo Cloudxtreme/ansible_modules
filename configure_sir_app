@@ -113,4 +113,3 @@ def main():
 
 
 main()
-configure_sir_app
