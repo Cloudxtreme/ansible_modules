@@ -108,7 +108,7 @@ def main():
         else:
             sir_method = sir.post_variables
 
-        sir_method(category, name, content=json.dumps(app_content))
+        sir_method(category=category, name=name, content=json.dumps(app_content))
         module.exit_json(changed=changed, msg=diff)
 
 
