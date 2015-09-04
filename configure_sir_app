@@ -1,0 +1,116 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# Copyright 2015 Spotify AB. All rights reserved.
+#
+# The contents of this file are licensed under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with the
+# License. You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations under
+# the License.
+
+from ansible.module_utils.basic import *
+
+from pySIR.pySIR import pySIR
+import json
+
+DOCUMENTATION = '''
+---
+module: configure_sir
+author: David Barroso <dbarroso@spotify.net>
+version_added: "1.0.0"
+short_description:
+description:
+    Adds/Updates configuration for a SIR (SDN Internet Router) application.
+
+requirements:
+    - pySIR
+
+options:
+    hostname:
+        url: Base URL for the SIR API-
+        required: true
+    app_name:
+        description: Name of the SIR app
+        required: true
+    app_category:
+        description: Category of the SIR app
+        required: true
+    app_content:
+        description: Configuration for the SIR app. Usually a dict but can be any object that can be serializable.
+        required: false
+'''
+
+EXAMPLES = '''
+  - name: Configure fib_optimizer
+    configure_sir_app:
+      url: "https://{{ inventory_hostname }}/sir"
+      app_name: "fib_optimizer"
+      app_category: "apps"
+      app_content:
+        lem_prefixes: '24'
+        max_lem_prefixes: 20000
+        max_lpm_prefixes: 16000
+        path: '/tmp/'
+        age: 168
+        purge_older_than: 336
+'''
+
+
+def dict_diff(dict_a, dict_b):
+    return dict([
+        (key, dict_b.get(key, dict_a.get(key))) for key in set(dict_a.keys() + dict_b.keys()) if (
+            (key in dict_a and (not key in dict_b or dict_a[key] != dict_b[key])) or (key in dict_b and (
+                not key in dict_a or dict_a[key] != dict_b[key])))
+    ])
+
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            url=dict(required=True),
+            app_name=dict(required=True),
+            app_category=dict(required=True),
+            app_content=dict(required=True),),
+        supports_check_mode=True)
+
+    url = module.params['url']
+    name = module.params['app_name']
+    category = module.params['app_category']
+    app_content = module.params['app_content']
+
+    sir = pySIR(url, verify_ssl=False)
+
+    result = sir.get_variables_by_category_and_name(category, name).result
+
+    if len(result):
+        update_configuration = True
+        existing_configuration = dict()
+        existing_configuration = json.loads(result[0]['content'])
+    else:
+        update_configuration = False
+        existing_configuration = dict()
+
+    diff = dict_diff(existing_configuration, app_content)
+    changed = len(diff)
+
+    if module.check_mode or not changed:
+        module.exit_json(changed=changed, msg=diff)
+    else:
+        if update_configuration:
+            sir_method = sir.put_variables_by_category_and_name
+        else:
+            sir_method = sir.post_variables
+
+        sir_method(category, name, content=json.dumps(app_content))
+        module.exit_json(changed=changed, msg=diff)
+
+
+main()
+configure_sir_app
