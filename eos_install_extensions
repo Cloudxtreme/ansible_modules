@@ -1,0 +1,199 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# Copyright 2015 Spotify AB. All rights reserved.
+#
+# The contents of this file are licensed under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with the
+# License. You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations under
+# the License.
+
+from ansible.module_utils.basic import *
+import pyeapi
+
+DOCUMENTATION = '''
+---
+module: eos_install_extensions
+author: David Barroso <dbarroso@spotify.net>
+version_added: "1.0.0"
+short_description:
+description:
+    Manages EOS exentsions.
+
+requirements:
+    - pyeapi
+
+options:
+    hostname:
+        description: IP or FQDN of the device you want to connect to.
+        required: true
+    username:
+        description: Username.
+        required: true
+    password:
+        description: Password.
+        required: true
+    transport:
+        description: Either http or https. Default is https.
+        required: false
+    vrf:
+        description: VRF to use. Default is 'default' (global VRF).
+        required: false
+    extensions:
+        description: List of extensions you want to install.
+        required: true
+    persistent:
+        description: After all the extensions are installed run "copy installed-extensions boot-extensions"
+        required: true
+'''
+
+EXAMPLES = '''
+  - name: Deploy application
+    eos_install_extensions:
+      hostname: "{{ inventory_hostname }}"
+      username: "spotify"
+      password: "Hej4ui0ACp"
+      vrf: "mgmtVRF"
+      persistent: true
+      extensions:
+        - 'https://github.com/dbarrosop/pySIR/releases/download/v0.45/pySIR-0.45-1.noarch.swix'
+        - 'https://github.com/dbarrosop/sir/releases/download/v0.17/sir-0.17-1.noarch.swix'
+        - 'https://github.com/dbarrosop/sir/releases/download/v0.17/pmacct_sir-0.1-1.noarch.swix'
+        - 'https://github.com/dbarrosop/sir_apps/releases/download/v0.1/fib_optimizer-0.1-1.noarch.swix'
+'''
+
+
+class Extension:
+
+    def __init__(self, full_path):
+        self.full_path = full_path
+        self.short_path = full_path.split('/')[-1]
+        self.name, self.version, self.release = full_path.split('/')[-1].split('-')
+        self.release = self.release.split('.')[0]
+
+    def __eq__(self, other):
+        return self.name == other.name and self.version == other.version and self.release == other.release
+
+    def __str__(self):
+        return '{}-{}-{}'.format(self.name, self.version, self.release)
+
+    def __repr__(self):
+        return '{}: {}'.format(self.__class__.__name__, self)
+
+    def __hash__(self):
+        return hash(self.name) ^ hash(self.version) ^ hash(self.release)
+
+
+def remove_extensions_from_node(node, extensions):
+    commands = list()
+    for e in extensions:
+        if result[e.full_path]['status'] == 'installed':
+            commands.append('no extension {}'.format(e.full_path))
+
+        commands.append('delete extension:{}'.format(e.full_path))
+
+    node.run_commands(commands)
+
+
+def download_extensions_to_node(node, vrf, extensions):
+    commands = list()
+    if vrf != 'default':
+        commands.append('routing-context vrf {}'.format(vrf))
+
+    for e in extensions:
+        commands.append('copy {} file:/tmp/'.format(e.full_path))
+
+    node.run_commands(commands)
+
+    commands = list()
+    for e in extensions:
+        # Horrible hack due to BUG 102690
+        # When the bug is fixed we should download the extension directly to extension, i.e.:
+        # copy https:/.... extension:
+        commands.append('bash timeout 600 FastCli -p15 -c "copy file:/tmp/{} extension:"'.format(e.short_path))
+    node.run_commands(commands)
+
+
+def install_extensions_to_node(node, install_extensions):
+    commands = list()
+    for e in install_extensions:
+        commands.append('extension {}'.format(e.short_path))
+    node.run_commands(commands)
+
+
+def make_changes_persistent(node):
+    node.run_commands(['copy installed-extensions boot-extensions'])
+
+
+def main():
+    module = AnsibleModule(
+        argument_spec=dict(
+            hostname=dict(required=True),
+            username=dict(required=True),
+            password=dict(required=True),
+            transport=dict(default='https'),
+            vrf=dict(default='default'),
+            extensions=dict(required=True),
+            persistent=dict(required=True),),
+        supports_check_mode=True)
+
+    hostname = module.params['hostname']
+    username = module.params['username']
+    password = module.params['password']
+    transport = module.params['transport']
+
+    extensions = module.params['extensions']
+    persistent = module.params['persistent']
+
+    if transport == 'https':
+        port = 443
+    elif transport == 'http':
+        port = 80
+
+    connection = pyeapi.client.connect(
+        transport=transport,
+        host=hostname,
+        username=username,
+        password=password,
+        port=port)
+    node = pyeapi.client.Node(connection)
+
+    result = node.run_commands(['show extensions'])[0]['extensions']
+
+    extensions = set([Extension(e) for e in extensions])
+
+    installed_extensions = set()
+    for extension, details in result.iteritems():
+        if details['presence'] == 'absent' or details['status'] == 'notInstalled':
+            continue
+        else:
+            installed_extensions.add(Extension(extension))
+
+    remove_extensions = installed_extensions - extensions
+    install_extensions = extensions - installed_extensions
+
+    changed = len(remove_extensions) or len(install_extensions)
+
+    msg = 'Installed: {}, removed: {}'.format(install_extensions, remove_extensions)
+
+    if module.check_mode or not changed:
+        module.exit_json(changed=changed, msg=msg)
+    else:
+        remove_extensions_from_node(node, remove_extensions)
+        download_extensions_to_node(node, vrf, install_extensions)
+        install_extensions_to_node(node, install_extensions)
+
+        if persistent:
+            make_changes_persistent(node)
+
+        module.exit_json(changed=changed, msg=msg)
+
+
+main()
